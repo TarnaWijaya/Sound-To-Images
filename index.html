@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vizard Meteo - Sound to Image</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: #0a0a0a;
+            color: #00f3ff;
+            min-height: 100vh;
+        }
+        .neon-border {
+            border: 2px solid #00f3ff;
+            box-shadow: 0 0 15px #00f3ff;
+        }
+        .wave-visualizer {
+            height: 100px;
+            background: #000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <h1 class="text-center mb-4">🎛️ Vizard Meteo</h1>
+        
+        <!-- Mode Selection -->
+        <div class="row justify-content-center mb-4">
+            <div class="col-md-6">
+                <button class="btn btn-primary w-100 mb-3" id="btnReceive">
+                    🎤 Menerima Gambar dari Suara
+                </button>
+                <button class="btn btn-success w-100" id="btnSend">
+                    📤 Mengirim Gambar sebagai Suara
+                </button>
+            </div>
+        </div>
+
+        <!-- Visualizer -->
+        <div class="wave-visualizer neon-border mb-4" id="visualizer"></div>
+
+        <!-- Image Preview -->
+        <div class="text-center">
+            <img id="imagePreview" class="img-thumbnail neon-border" style="max-width: 300px; display: none;">
+        </div>
+
+        <!-- Hidden File Input -->
+        <input type="file" id="fileInput" hidden accept=".png,.jpg,.jpeg">
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.rawgit.com/mattdiamond/Recorderjs/08e7f667/dist/recorder.js"></script>
+
+    <script>
+        const FREQ_LOW = 1000;
+        const FREQ_HIGH = 2000;
+        let isRecording = false;
+        let audioContext;
+        let recorder;
+
+        // Audio Visualizer
+        function initVisualizer() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 800;
+            canvas.height = 100;
+            document.getElementById('visualizer').appendChild(canvas);
+            return canvas.getContext('2d');
+        }
+
+        // Menerima Gambar
+        document.getElementById('btnReceive').addEventListener('click', async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new AudioContext();
+                const source = audioContext.createMediaStreamSource(stream);
+                recorder = new Recorder(source);
+                
+                recorder.record();
+                isRecording = true;
+                alert("Rekaman dimulai... Klik OK untuk menghentikan");
+
+                setTimeout(async () => {
+                    recorder.stop();
+                    isRecording = false;
+                    stream.getTracks().forEach(track => track.stop());
+                    
+                    recorder.exportWAV(async (blob) => {
+                        const buffer = await blob.arrayBuffer();
+                        const audioData = new Uint8Array(buffer);
+                        const binaryData = audioToBinary(audioData);
+                        
+                        const img = document.getElementById('imagePreview');
+                        img.src = URL.createObjectURL(new Blob([binaryData]));
+                        img.style.display = 'block';
+                    });
+                }, 5000); // Rekam selama 5 detik
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+            }
+        });
+
+        // Mengirim Gambar
+        document.getElementById('btnSend').addEventListener('click', () => {
+            document.getElementById('fileInput').click();
+        });
+
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = async (event) => {
+                const binaryData = new Uint8Array(event.target.result);
+                const audioBuffer = binaryToAudio(binaryData);
+                
+                const blob = new Blob([audioBuffer], { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'output.wav';
+                a.click();
+            };
+            
+            reader.readAsArrayBuffer(file);
+        });
+
+        // FSK Encoding/Decoding
+        function audioToBinary(audioData) {
+            // Implementasi decoding FSK
+            const binary = [];
+            // ... logika decoding ...
+            return new Uint8Array(binary);
+        }
+
+        function binaryToAudio(binaryData) {
+            // Implementasi encoding FSK
+            const audioBuffer = [];
+            // ... logika encoding ...
+            return new Uint8Array(audioBuffer);
+        }
+    </script>
+</body>
+          </html>
