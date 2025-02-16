@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vizard Meteo - Sound to Image</title>
+    <title>Vizard Meteo - Real-Time Sound Imaging</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body {
@@ -19,17 +19,20 @@
             height: 100px;
             background: #000;
         }
+        #spectrumCanvas {
+            width: 100%;
+            height: 100%;
+        }
     </style>
 </head>
 <body>
     <div class="container py-5">
-        <h1 class="text-center mb-4">🎛️ Vizard Meteo</h1>
+        <h1 class="text-center mb-4">🎛️ Vizard Meteo Real-Time</h1>
         
-        <!-- Mode Selection -->
         <div class="row justify-content-center mb-4">
             <div class="col-md-6">
                 <button class="btn btn-primary w-100 mb-3" id="btnReceive">
-                    🎤 Menerima Gambar dari Suara
+                    🎤 Menerima Gambar Real-Time
                 </button>
                 <button class="btn btn-success w-100" id="btnSend">
                     📤 Mengirim Gambar sebagai Suara
@@ -37,109 +40,210 @@
             </div>
         </div>
 
-        <!-- Visualizer -->
-        <div class="wave-visualizer neon-border mb-4" id="visualizer"></div>
+        <div class="wave-visualizer neon-border mb-4">
+            <canvas id="spectrumCanvas"></canvas>
+        </div>
 
-        <!-- Image Preview -->
         <div class="text-center">
             <img id="imagePreview" class="img-thumbnail neon-border" style="max-width: 300px; display: none;">
         </div>
 
-        <!-- Hidden File Input -->
         <input type="file" id="fileInput" hidden accept=".png,.jpg,.jpeg">
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.0/dist/jquery.min.js"></script>
-    <script src="https://cdn.rawgit.com/mattdiamond/Recorderjs/08e7f667/dist/recorder.js"></script>
-
     <script>
-        const FREQ_LOW = 1000;
-        const FREQ_HIGH = 2000;
-        let isRecording = false;
-        let audioContext;
-        let recorder;
+        const SAMPLE_RATE = 44100;
+        const BIT_DURATION = 0.02; // Detik per bit
+        const FREQ_0 = 1500;        // Frekuensi untuk bit 0
+        const FREQ_1 = 2500;        // Frekuensi untuk bit 1
+        const SAMPLES_PER_BIT = SAMPLE_RATE * BIT_DURATION;
 
-        // Audio Visualizer
+        let audioContext;
+        let isTransmitting = false;
+        let isReceiving = false;
+        let canvasCtx;
+
+        // Inisialisasi visualizer
         function initVisualizer() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 800;
-            canvas.height = 100;
-            document.getElementById('visualizer').appendChild(canvas);
-            return canvas.getContext('2d');
+            const canvas = document.getElementById('spectrumCanvas');
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            canvasCtx = canvas.getContext('2d');
         }
 
-        // Menerima Gambar
+        // Fungsi Goertzel untuk deteksi frekuensi
+        function goertzel(samples, targetFreq) {
+            const omega = (2 * Math.PI * targetFreq) / SAMPLE_RATE;
+            const coeff = 2 * Math.cos(omega);
+            let sPrev = 0;
+            let sPrev2 = 0;
+
+            for (let sample of samples) {
+                const s = sample + coeff * sPrev - sPrev2;
+                sPrev2 = sPrev;
+                sPrev = s;
+            }
+            return sPrev2 * sPrev2 + sPrev * sPrev - coeff * sPrev * sPrev2;
+        }
+
+        // Penerimaan data real-time
+        class Receiver {
+            constructor() {
+                this.sampleBuffer = [];
+                this.bitBuffer = [];
+                this.imageSize = null;
+                this.imageData = [];
+                this.headerReceived = false;
+            }
+
+            processAudio(input) {
+                this.sampleBuffer.push(...input);
+                
+                while (this.sampleBuffer.length >= SAMPLES_PER_BIT) {
+                    const chunk = this.sampleBuffer.splice(0, SAMPLES_PER_BIT);
+                    const energy0 = goertzel(chunk, FREQ_0);
+                    const energy1 = goertzel(chunk, FREQ_1);
+                    
+                    this.bitBuffer.push(energy1 > energy0 ? 1 : 0);
+                    
+                    if (this.bitBuffer.length >= 8) {
+                        const byte = parseInt(this.bitBuffer.splice(0,8).join(''), 2);
+                        this.handleByte(byte);
+                    }
+                }
+            }
+
+            handleByte(byte) {
+                if (!this.headerReceived) {
+                    if (byte === 0xAA) { // Start byte
+                        this.headerReceived = true;
+                        this.imageSize = null;
+                        this.imageData = [];
+                    }
+                    return;
+                }
+
+                if (this.imageSize === null) {
+                    this.imageSize = byte << 8;
+                    return;
+                }
+
+                if (typeof this.imageSize === 'number') {
+                    this.imageSize |= byte;
+                    if (this.imageSize > 0) return;
+                }
+
+                this.imageData.push(byte);
+                
+                if (this.imageData.length === Math.abs(this.imageSize)) {
+                    this.showImage();
+                    this.headerReceived = false;
+                }
+            }
+
+            showImage() {
+                const blob = new Blob([new Uint8Array(this.imageData)], {type: 'image/jpeg'});
+                const url = URL.createObjectURL(blob);
+                const img = document.getElementById('imagePreview');
+                img.src = url;
+                img.style.display = 'block';
+            }
+        }
+
+        // Pengiriman data
+        async function sendImage(imageData) {
+            const header = new Uint8Array([0xAA, (imageData.length >> 8) & 0xFF, imageData.length & 0xFF]);
+            const data = new Uint8Array([...header, ...imageData]);
+            
+            const audioContext = new AudioContext();
+            const buffer = audioContext.createBuffer(1, data.length * 8 * SAMPLES_PER_BIT, SAMPLE_RATE);
+            const channel = buffer.getChannelData(0);
+            
+            let pos = 0;
+            for (let byte of data) {
+                for (let i = 7; i >= 0; i--) {
+                    const bit = (byte >> i) & 1;
+                    const freq = bit ? FREQ_1 : FREQ_0;
+                    const omega = 2 * Math.PI * freq / SAMPLE_RATE;
+                    
+                    for (let j = 0; j < SAMPLES_PER_BIT; j++) {
+                        channel[pos++] = Math.sin(omega * j) * 0.5;
+                    }
+                }
+            }
+
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start();
+        }
+
+        // Event handlers
         document.getElementById('btnReceive').addEventListener('click', async () => {
+            if (isReceiving) return;
+            
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioContext = new AudioContext();
                 const source = audioContext.createMediaStreamSource(stream);
-                recorder = new Recorder(source);
+                const receiver = new Receiver();
                 
-                recorder.record();
-                isRecording = true;
-                alert("Rekaman dimulai... Klik OK untuk menghentikan");
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                processor.onaudioprocess = e => {
+                    const input = e.inputBuffer.getChannelData(0);
+                    receiver.processAudio(input);
+                    visualize(input);
+                };
 
-                setTimeout(async () => {
-                    recorder.stop();
-                    isRecording = false;
-                    stream.getTracks().forEach(track => track.stop());
-                    
-                    recorder.exportWAV(async (blob) => {
-                        const buffer = await blob.arrayBuffer();
-                        const audioData = new Uint8Array(buffer);
-                        const binaryData = audioToBinary(audioData);
-                        
-                        const img = document.getElementById('imagePreview');
-                        img.src = URL.createObjectURL(new Blob([binaryData]));
-                        img.style.display = 'block';
-                    });
-                }, 5000); // Rekam selama 5 detik
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                isReceiving = true;
             } catch (err) {
                 console.error('Error accessing microphone:', err);
             }
         });
 
-        // Mengirim Gambar
         document.getElementById('btnSend').addEventListener('click', () => {
             document.getElementById('fileInput').click();
         });
 
-        document.getElementById('fileInput').addEventListener('change', async (e) => {
+        document.getElementById('fileInput').addEventListener('change', async e => {
             const file = e.target.files[0];
             const reader = new FileReader();
             
-            reader.onload = async (event) => {
-                const binaryData = new Uint8Array(event.target.result);
-                const audioBuffer = binaryToAudio(binaryData);
-                
-                const blob = new Blob([audioBuffer], { type: 'audio/wav' });
-                const url = URL.createObjectURL(blob);
-                
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'output.wav';
-                a.click();
+            reader.onload = async e => {
+                const data = new Uint8Array(e.target.result);
+                await sendImage(data);
             };
             
             reader.readAsArrayBuffer(file);
         });
 
-        // FSK Encoding/Decoding
-        function audioToBinary(audioData) {
-            // Implementasi decoding FSK
-            const binary = [];
-            // ... logika decoding ...
-            return new Uint8Array(binary);
+        // Visualisasi waveform
+        function visualize(data) {
+            if (!canvasCtx) initVisualizer();
+            
+            canvasCtx.fillStyle = '#000';
+            canvasCtx.fillRect(0, 0, canvasCtx.canvas.width, canvasCtx.canvas.height);
+            
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeStyle = '#00f3ff';
+            canvasCtx.beginPath();
+            
+            const sliceWidth = canvasCtx.canvas.width / data.length;
+            let x = 0;
+
+            for (let i = 0; i < data.length; i++) {
+                const y = data[i] * canvasCtx.canvas.height/2 + canvasCtx.canvas.height/2;
+                i === 0 ? canvasCtx.moveTo(x, y) : canvasCtx.lineTo(x, y);
+                x += sliceWidth;
+            }
+            
+            canvasCtx.stroke();
         }
 
-        function binaryToAudio(binaryData) {
-            // Implementasi encoding FSK
-            const audioBuffer = [];
-            // ... logika encoding ...
-            return new Uint8Array(audioBuffer);
-        }
+        initVisualizer();
     </script>
 </body>
-          </html>
+</html>
