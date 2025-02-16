@@ -6,65 +6,36 @@
     <title>Vizard Meteo - Real-Time Sound Imaging</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body {
-            background: #0a0a0a;
-            color: #00f3ff;
-            min-height: 100vh;
-        }
-        .neon-border {
-            border: 2px solid #00f3ff;
-            box-shadow: 0 0 15px #00f3ff;
-        }
-        .wave-visualizer {
-            height: 100px;
-            background: #000;
-        }
-        #spectrumCanvas {
-            width: 100%;
-            height: 100%;
-        }
+        body { background: #0a0a0a; color: #00f3ff; min-height: 100vh; }
+        .neon-border { border: 2px solid #00f3ff; box-shadow: 0 0 15px #00f3ff; }
+        .wave-visualizer { height: 100px; background: #000; }
+        #spectrumCanvas { width: 100%; height: 100%; }
     </style>
 </head>
 <body>
     <div class="container py-5">
         <h1 class="text-center mb-4">🎛️ Vizard Meteo Real-Time</h1>
-        
         <div class="row justify-content-center mb-4">
             <div class="col-md-6">
-                <button class="btn btn-primary w-100 mb-3" id="btnReceive">
-                    🎤 Menerima Gambar Real-Time
-                </button>
-                <button class="btn btn-success w-100" id="btnSend">
-                    📤 Mengirim Gambar sebagai Suara
-                </button>
+                <button class="btn btn-primary w-100 mb-3" id="btnReceive">🎤 Menerima Gambar</button>
+                <button class="btn btn-success w-100" id="btnSend">📤 Mengirim Gambar</button>
             </div>
         </div>
-
-        <div class="wave-visualizer neon-border mb-4">
-            <canvas id="spectrumCanvas"></canvas>
-        </div>
-
-        <div class="text-center">
-            <img id="imagePreview" class="img-thumbnail neon-border" style="max-width: 300px; display: none;">
-        </div>
-
+        <div class="wave-visualizer neon-border mb-4"><canvas id="spectrumCanvas"></canvas></div>
+        <div class="text-center"><img id="imagePreview" class="img-thumbnail neon-border" style="max-width: 300px; display: none;"></div>
         <input type="file" id="fileInput" hidden accept=".png,.jpg,.jpeg">
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         const SAMPLE_RATE = 44100;
-        const BIT_DURATION = 0.02; // Detik per bit
-        const FREQ_0 = 1500;        // Frekuensi untuk bit 0
-        const FREQ_1 = 2500;        // Frekuensi untuk bit 1
+        const BIT_DURATION = 0.1;
+        const FREQ_0 = 1800;
+        const FREQ_1 = 2800;
         const SAMPLES_PER_BIT = SAMPLE_RATE * BIT_DURATION;
+        const VOLUME = 0.8;
+        let audioContext, isReceiving = false, canvasCtx;
 
-        let audioContext;
-        let isTransmitting = false;
-        let isReceiving = false;
-        let canvasCtx;
-
-        // Inisialisasi visualizer
         function initVisualizer() {
             const canvas = document.getElementById('spectrumCanvas');
             canvas.width = canvas.offsetWidth;
@@ -72,22 +43,19 @@
             canvasCtx = canvas.getContext('2d');
         }
 
-        // Fungsi Goertzel untuk deteksi frekuensi
         function goertzel(samples, targetFreq) {
             const omega = (2 * Math.PI * targetFreq) / SAMPLE_RATE;
             const coeff = 2 * Math.cos(omega);
-            let sPrev = 0;
-            let sPrev2 = 0;
-
+            let sPrev = 0, sPrev2 = 0, totalEnergy = 0;
             for (let sample of samples) {
                 const s = sample + coeff * sPrev - sPrev2;
                 sPrev2 = sPrev;
                 sPrev = s;
+                totalEnergy += sample * sample;
             }
-            return sPrev2 * sPrev2 + sPrev * sPrev - coeff * sPrev * sPrev2;
+            return (sPrev2*sPrev2 + sPrev*sPrev - coeff*sPrev*sPrev2) / (totalEnergy || 1);
         }
 
-        // Penerimaan data real-time
         class Receiver {
             constructor() {
                 this.sampleBuffer = [];
@@ -95,18 +63,26 @@
                 this.imageSize = null;
                 this.imageData = [];
                 this.headerReceived = false;
+                this.syncCounter = 0;
             }
 
             processAudio(input) {
-                this.sampleBuffer.push(...input);
-                
+                const filtered = input.map(s => Math.tanh(s * 5));
+                this.sampleBuffer.push(...filtered);
                 while (this.sampleBuffer.length >= SAMPLES_PER_BIT) {
                     const chunk = this.sampleBuffer.splice(0, SAMPLES_PER_BIT);
+                    if (!this.headerReceived) {
+                        const energy = chunk.reduce((a, b) => a + Math.abs(b), 0);
+                        if (energy > 20) this.syncCounter++;
+                        if (this.syncCounter === 3) {
+                            this.headerReceived = true;
+                            this.syncCounter = 0;
+                        }
+                        continue;
+                    }
                     const energy0 = goertzel(chunk, FREQ_0);
                     const energy1 = goertzel(chunk, FREQ_1);
-                    
-                    this.bitBuffer.push(energy1 > energy0 ? 1 : 0);
-                    
+                    this.bitBuffer.push(energy1 > energy0 * 1.5 ? 1 : 0);
                     if (this.bitBuffer.length >= 8) {
                         const byte = parseInt(this.bitBuffer.splice(0,8).join(''), 2);
                         this.handleByte(byte);
@@ -115,27 +91,21 @@
             }
 
             handleByte(byte) {
-                if (!this.headerReceived) {
-                    if (byte === 0xAA) { // Start byte
-                        this.headerReceived = true;
-                        this.imageSize = null;
-                        this.imageData = [];
-                    }
-                    return;
-                }
-
                 if (this.imageSize === null) {
-                    this.imageSize = byte << 8;
-                    return;
+                    if (typeof this.imageSize === 'number') {
+                        this.imageSize |= byte;
+                        if (this.imageSize > 0) return;
+                    } else {
+                        this.imageSize = byte << 8;
+                        return;
+                    }
                 }
-
-                if (typeof this.imageSize === 'number') {
-                    this.imageSize |= byte;
-                    if (this.imageSize > 0) return;
-                }
-
                 this.imageData.push(byte);
-                
+                if (this.imageData.length % 64 === 63) {
+                    const checksum = this.imageData.pop();
+                    const chunk = this.imageData.slice(-63);
+                    if (chunk.reduce((a,b) => a ^ b, 0) !== checksum) this.reset();
+                }
                 if (this.imageData.length === Math.abs(this.imageSize)) {
                     this.showImage();
                     this.headerReceived = false;
@@ -144,102 +114,91 @@
 
             showImage() {
                 const blob = new Blob([new Uint8Array(this.imageData)], {type: 'image/jpeg'});
-                const url = URL.createObjectURL(blob);
-                const img = document.getElementById('imagePreview');
-                img.src = url;
-                img.style.display = 'block';
+                document.getElementById('imagePreview').src = URL.createObjectURL(blob);
+                document.getElementById('imagePreview').style.display = 'block';
+            }
+
+            reset() {
+                this.sampleBuffer = [];
+                this.bitBuffer = [];
+                this.imageSize = null;
+                this.imageData = [];
+                this.headerReceived = false;
             }
         }
 
-        // Pengiriman data
         async function sendImage(imageData) {
-            const header = new Uint8Array([0xAA, (imageData.length >> 8) & 0xFF, imageData.length & 0xFF]);
-            const data = new Uint8Array([...header, ...imageData]);
-            
+            const chunks = [];
+            for (let i = 0; i < imageData.length; i += 63) {
+                const chunk = imageData.slice(i, i+63);
+                chunks.push(...chunk, chunk.reduce((a,b) => a ^ b, 0));
+            }
+            const header = new Uint8Array([0xAA, 0xAA, 0xAA]);
+            const sizeHeader = new Uint8Array([(imageData.length >> 8) & 0xFF, imageData.length & 0xFF]);
+            const data = new Uint8Array([...header, ...sizeHeader, ...chunks]);
             const audioContext = new AudioContext();
             const buffer = audioContext.createBuffer(1, data.length * 8 * SAMPLES_PER_BIT, SAMPLE_RATE);
             const channel = buffer.getChannelData(0);
-            
             let pos = 0;
             for (let byte of data) {
                 for (let i = 7; i >= 0; i--) {
                     const bit = (byte >> i) & 1;
                     const freq = bit ? FREQ_1 : FREQ_0;
                     const omega = 2 * Math.PI * freq / SAMPLE_RATE;
-                    
                     for (let j = 0; j < SAMPLES_PER_BIT; j++) {
-                        channel[pos++] = Math.sin(omega * j) * 0.5;
+                        channel[pos++] = Math.sin(omega * j) * VOLUME + (j % 2 === 0 ? Math.sin(omega * j * 3) * VOLUME * 0.3 : 0);
                     }
                 }
             }
-
             const source = audioContext.createBufferSource();
+            const compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.setValueAtTime(-20, audioContext.currentTime);
+            compressor.knee.setValueAtTime(40, audioContext.currentTime);
+            compressor.ratio.setValueAtTime(12, audioContext.currentTime);
             source.buffer = buffer;
-            source.connect(audioContext.destination);
+            source.connect(compressor);
+            compressor.connect(audioContext.destination);
             source.start();
         }
 
-        // Event handlers
         document.getElementById('btnReceive').addEventListener('click', async () => {
             if (isReceiving) return;
-            
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioContext = new AudioContext();
-                const source = audioContext.createMediaStreamSource(stream);
-                const receiver = new Receiver();
-                
                 const processor = audioContext.createScriptProcessor(4096, 1, 1);
                 processor.onaudioprocess = e => {
                     const input = e.inputBuffer.getChannelData(0);
-                    receiver.processAudio(input);
+                    new Receiver().processAudio(input);
                     visualize(input);
                 };
-
-                source.connect(processor);
+                audioContext.createMediaStreamSource(stream).connect(processor);
                 processor.connect(audioContext.destination);
                 isReceiving = true;
-            } catch (err) {
-                console.error('Error accessing microphone:', err);
-            }
+            } catch (err) { console.error('Error:', err); }
         });
 
-        document.getElementById('btnSend').addEventListener('click', () => {
-            document.getElementById('fileInput').click();
-        });
-
-        document.getElementById('fileInput').addEventListener('change', async e => {
-            const file = e.target.files[0];
+        document.getElementById('btnSend').addEventListener('click', () => document.getElementById('fileInput').click());
+        document.getElementById('fileInput').addEventListener('change', e => {
             const reader = new FileReader();
-            
-            reader.onload = async e => {
-                const data = new Uint8Array(e.target.result);
-                await sendImage(data);
-            };
-            
-            reader.readAsArrayBuffer(file);
+            reader.onload = e => sendImage(new Uint8Array(e.target.result));
+            reader.readAsArrayBuffer(e.target.files[0]);
         });
 
-        // Visualisasi waveform
         function visualize(data) {
             if (!canvasCtx) initVisualizer();
-            
             canvasCtx.fillStyle = '#000';
             canvasCtx.fillRect(0, 0, canvasCtx.canvas.width, canvasCtx.canvas.height);
-            
             canvasCtx.lineWidth = 2;
             canvasCtx.strokeStyle = '#00f3ff';
             canvasCtx.beginPath();
-            
             const sliceWidth = canvasCtx.canvas.width / data.length;
             let x = 0;
-
             for (let i = 0; i < data.length; i++) {
                 const y = data[i] * canvasCtx.canvas.height/2 + canvasCtx.canvas.height/2;
                 i === 0 ? canvasCtx.moveTo(x, y) : canvasCtx.lineTo(x, y);
                 x += sliceWidth;
             }
-            
             canvasCtx.stroke();
         }
 
